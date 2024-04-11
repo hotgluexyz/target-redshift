@@ -644,6 +644,7 @@ class DbSync:
             columns = self.get_table_columns(self.schema_name, table_name)
 
         columns_dict = {column['column_name'].lower(): column for column in columns}
+        self.logger.info(f"Found columns: {columns_dict}")
 
         columns_to_add = [
             column_clause(
@@ -653,6 +654,8 @@ class DbSync:
             for (name, properties_schema) in self.flatten_schema.items()
             if name.lower() not in columns_dict
         ]
+
+        self.logger.info(f"Adding columns: {columns_to_add}")
 
         for column in columns_to_add:
             self.add_column(column, stream)
