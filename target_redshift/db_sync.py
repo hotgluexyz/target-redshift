@@ -629,6 +629,7 @@ class DbSync:
         if table_schema is not None: sql = sql + " AND LOWER(c.table_schema) = '" + table_schema.lower() + "'"
         if table_name is not None: sql = sql + " AND LOWER(c.table_name) = '" + table_name.replace("\"", "").lower() + "'"
         if filter_schemas is not None: sql = sql + " AND LOWER(c.table_schema) IN (" + ', '.join("'{}'".format(s).lower() for s in filter_schemas) + ")"
+        self.logger.info(f"get_table_columns: [{sql}]")
         return self.query(sql)
 
     def update_columns(self):
@@ -637,10 +638,12 @@ class DbSync:
         table_name = self.table_name(stream, is_stage=False, without_schema=True)
 
         if self.table_cache:
+            self.logger.info(f"Using cache to list columns")
             columns = list(filter(lambda x: x['table_schema'] == self.schema_name.lower() and
                                             f'"{x["table_name"].upper()}"' == table_name,
                                   self.table_cache))
         else:
+            self.logger.info(f"Fetching all columns direct")
             columns = self.get_table_columns(self.schema_name, table_name)
 
         columns_dict = {column['column_name'].lower(): column for column in columns}
