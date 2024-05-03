@@ -9,6 +9,7 @@ import time
 import boto3
 import psycopg2
 import psycopg2.extras
+import psycopg2.sql
 
 import inflection
 from singer import get_logger
@@ -317,16 +318,46 @@ class DbSync:
             self.data_flattening_max_level = self.connection_config.get('data_flattening_max_level', 0)
             self.flatten_schema = flatten_schema(stream_schema_message['schema'], max_level=self.data_flattening_max_level)
 
-    def open_connection(self):
-        conn_string = "host='{}' dbname='{}' user='{}' password='{}' port='{}'".format(
-            self.connection_config['host'],
-            self.connection_config['dbname'],
-            self.connection_config['user'],
-            self.connection_config['password'],
-            self.connection_config['port']
-        )
+    def open_connection(self, should_create_table=True):
+        build_conn_string = lambda dbname: "host='{}' dbname='{}' user='{}' password='{}' port='{}'".format(
+                self.connection_config['host'],
+                dbname,
+                self.connection_config['user'],
+                self.connection_config['password'],
+                self.connection_config['port']
+            )
+        try:
+            return psycopg2.connect(build_conn_string(self.connection_config['dbname']))
+        except psycopg2.OperationalError as e:
+            if not should_create_table:
+                raise e
 
-        return psycopg2.connect(conn_string)
+            error_str = str(e)
+
+            if not ("database" in error_str and "does not exist" in error_str):
+                raise e
+
+            self.logger.debug(f"Creating database: {self.connection_config['dbname']}")
+
+            connection = psycopg2.connect(build_conn_string("dev"))
+            connection.autocommit = True
+
+            sql_dbname = psycopg2.sql.Identifier(self.connection_config['dbname'])
+            sql_user = psycopg2.sql.Identifier(self.connection_config['user'])
+
+            create_cmd = psycopg2.sql.SQL("CREATE DATABASE {}").format(sql_dbname)
+            grant_cmd = psycopg2.sql.SQL("GRANT ALL PRIVILEGES ON DATABASE {} TO {}").format(sql_dbname, sql_user)
+
+            cursor = connection.cursor()
+
+            cursor.execute(create_cmd)
+            cursor.execute(grant_cmd)
+
+            cursor.close()
+            connection.close()
+
+            return self.open_connection(should_create_table=False)
+
 
     def query(self, query, params=None):
         self.logger.debug("Running query: {}".format(query))
