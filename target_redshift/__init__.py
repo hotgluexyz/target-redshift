@@ -11,6 +11,7 @@ import bz2
 from datetime import datetime
 from decimal import Decimal
 from tempfile import mkstemp
+import time
 
 from joblib import Parallel, delayed, parallel_backend
 from jsonschema import Draft7Validator, FormatChecker
@@ -450,4 +451,8 @@ def main():
 
 
 if __name__ == '__main__':
+    start_time = time.time()
     main()
+    execution_time = time.time() - start_time
+
+    LOGGER.info(f"Target execution completed in {execution_time:.2f} seconds")

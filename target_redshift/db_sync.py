@@ -581,9 +581,10 @@ class DbSync:
         primary_key = ["PRIMARY KEY ({})".format(', '.join(primary_column_names(stream_schema_message)))] \
             if len(stream_schema_message['key_properties']) else []
 
-        return 'CREATE TABLE IF NOT EXISTS {} ({})'.format(
+        return 'CREATE TABLE IF NOT EXISTS {} ({}) DISTSTYLE {}'.format(
             self.table_name(stream_schema_message['stream'], is_stage),
-            ', '.join(columns + primary_key)
+            ', '.join(columns + primary_key),
+            'EVEN' if is_stage else 'AUTO'
         )
 
     def drop_table_query(self, is_stage=False):
