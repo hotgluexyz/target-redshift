@@ -320,7 +320,8 @@ def flush_streams(
             delete_rows=config.get('hard_delete'),
             compression=config.get('compression'),
             slices=config.get('slices'),
-            temp_dir=config.get('temp_dir')
+            temp_dir=config.get('temp_dir'),
+            file_min_size=config.get('file_min_size')
         ) for stream in streams_to_flush)
 
     # reset flushed stream records to empty to avoid flushing same records
@@ -345,11 +346,11 @@ def flush_streams(
     return flushed_state
 
 
-def load_stream_batch(stream, records_to_load, row_count, db_sync, delete_rows=False, compression=None, slices=None, temp_dir=None):
+def load_stream_batch(stream, records_to_load, row_count, db_sync, delete_rows=False, compression=None, slices=None, temp_dir=None, file_min_size=1):
     # Load into redshift                                            
     try:
         if row_count[stream] > 0:
-            flush_records(stream, records_to_load, row_count[stream], db_sync, compression, slices, temp_dir)
+            flush_records(stream, records_to_load, row_count[stream], db_sync, compression, slices, temp_dir, file_min_size)
 
             # Delete soft-deleted, flagged rows - where _sdc_deleted at is not null
             if delete_rows:
@@ -372,7 +373,7 @@ def ceiling_division(n, d):
     return -(n // -d)
 
 
-def flush_records(stream, records_to_load, row_count, db_sync, compression=None, slices=None, temp_dir=None):
+def flush_records(stream, records_to_load, row_count, db_sync, compression=None, slices=None, temp_dir=None, file_min_size=1):
     slices = slices or 1
     use_gzip = compression == "gzip"
     use_bzip2 = compression == "bzip2"
@@ -393,7 +394,7 @@ def flush_records(stream, records_to_load, row_count, db_sync, compression=None,
     csv_files = []
     s3_keys = []
     size_bytes = 0
-    MAX_FILE_SIZE = 256 * 1024 * 1024  # 256MB in bytes
+    MAX_FILE_SIZE = file_min_size * 1024 * 1024  # file_min_size in MB
     current_file_size = 0
     current_file = None
     current_file_number = 1
@@ -442,7 +443,7 @@ def flush_records(stream, records_to_load, row_count, db_sync, compression=None,
             current_file_size,
             suffix="_" + date_suffix + file_extension + "." + str(current_file_number),
         )
-        size_bytes += os.path.getsize(csv_file)
+        size_bytes += os.path.getsize(current_file.name)
         s3_keys = s3_keys + [s3_key]
 
     # the copy key is the filename prefix without the chunk number
