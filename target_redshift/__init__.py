@@ -390,32 +390,57 @@ def flush_records(stream, records_to_load, row_count, db_sync, compression=None,
         open_method = bz2.open
         file_extension = file_extension + ".bz2"
 
-    if not isinstance(slices, int):
-        raise Exception("The provided configuration value 'slices' was not an integer")
-
     csv_files = []
     s3_keys = []
     size_bytes = 0
-
+    MAX_FILE_SIZE = 256 * 1024 * 1024  # 256MB in bytes
+    current_file_size = 0
+    current_file = None
+    current_file_number = 1
     date_suffix = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
 
-    # chunk files by the 'slices' config parameter in order to optimise Redshift COPY loading
-    # see https://docs.aws.amazon.com/redshift/latest/dg/c_best-practices-use-multiple-files.html
-    chunks = chunk_iterable(
-        list(records_to_load.values()), ceiling_division(len(records_to_load), slices)
-    )
-    for chunk_number, chunk in enumerate(chunks, start=1):
-        _, csv_file = mkstemp(suffix=file_extension + "." + str(chunk_number), prefix=f'{stream}_', dir=temp_dir)
-        csv_files = csv_files + [csv_file]
-        with open_method(csv_file, "w+b") as csv_f:
-            for record in chunk:
-                csv_line = db_sync.record_to_csv_line(record)
-                csv_f.write(bytes(csv_line + "\n", "UTF-8"))
+    for record in records_to_load.values():
+        # Calculate size of this record
+        csv_line = db_sync.record_to_csv_line(record)
+        record_size = len(bytes(csv_line + "\n", "UTF-8"))
+
+        # If adding this record would exceed MAX_FILE_SIZE, create a new file
+        if current_file_size + record_size > MAX_FILE_SIZE and current_file is not None:
+            # Close current file
+            current_file.close()
+            # Upload to S3
+            s3_key = db_sync.put_to_s3(
+                current_file.name,
+                stream,
+                current_file_size,
+                suffix="_" + date_suffix + file_extension + "." + str(current_file_number),
+            )
+            s3_keys = s3_keys + [s3_key]
+            size_bytes += current_file_size
+            # Reset for new file
+            current_file_size = 0
+            current_file_number += 1
+
+        # Create new file if needed
+        if current_file is None or current_file.closed:
+            _, temp_file = mkstemp(suffix=file_extension + "." + str(current_file_number), 
+                                    prefix=f'{stream}_', 
+                                    dir=temp_dir)
+            current_file = open_method(temp_file, "w+b")
+            csv_files.append(temp_file)
+
+        # Write record to current file
+        current_file.write(bytes(csv_line + "\n", "UTF-8"))
+        current_file_size += record_size
+
+    # Close and upload the last file if it exists
+    if current_file is not None and not current_file.closed:
+        current_file.close()
         s3_key = db_sync.put_to_s3(
-            csv_file,
+            current_file.name,
             stream,
-            len(chunk),
-            suffix="_" + date_suffix + file_extension + "." + str(chunk_number),
+            current_file_size,
+            suffix="_" + date_suffix + file_extension + "." + str(current_file_number),
         )
         size_bytes += os.path.getsize(csv_file)
         s3_keys = s3_keys + [s3_key]
