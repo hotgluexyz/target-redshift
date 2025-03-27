@@ -320,7 +320,8 @@ def flush_streams(
             delete_rows=config.get('hard_delete'),
             compression=config.get('compression'),
             slices=config.get('slices'),
-            temp_dir=config.get('temp_dir')
+            temp_dir=config.get('temp_dir'),
+            chunk_threshold_size=config.get('chunk_threshold_size', 10)
         ) for stream in streams_to_flush)
 
     # reset flushed stream records to empty to avoid flushing same records
@@ -345,11 +346,11 @@ def flush_streams(
     return flushed_state
 
 
-def load_stream_batch(stream, records_to_load, row_count, db_sync, delete_rows=False, compression=None, slices=None, temp_dir=None):
+def load_stream_batch(stream, records_to_load, row_count, db_sync, delete_rows=False, compression=None, slices=None, temp_dir=None, chunk_threshold_size=10):
     # Load into redshift                                            
     try:
         if row_count[stream] > 0:
-            flush_records(stream, records_to_load, row_count[stream], db_sync, compression, slices, temp_dir)
+            flush_records(stream, records_to_load, row_count[stream], db_sync, compression, slices, temp_dir, chunk_threshold_size)
 
             # Delete soft-deleted, flagged rows - where _sdc_deleted at is not null
             if delete_rows:
@@ -372,8 +373,52 @@ def ceiling_division(n, d):
     return -(n // -d)
 
 
-def flush_records(stream, records_to_load, row_count, db_sync, compression=None, slices=None, temp_dir=None):
-    slices = slices or 1
+def calculate_total_size(records_to_load, db_sync):
+    """Calculate total size of all records without writing to disk"""
+    total_size = 0
+    for record in records_to_load.values():
+        csv_line = db_sync.record_to_csv_line(record)
+        total_size += len(bytes(csv_line + "\n", "UTF-8"))
+    return total_size
+
+
+def estimate_total_size(records_to_load, db_sync, sample_size=1000):
+    """Estimate total size by sampling records"""
+    total_records = len(records_to_load)
+    if total_records <= sample_size:
+        # For small files, calculate exact size
+        return calculate_total_size(records_to_load, db_sync)
+    
+    # For large files, use sampling
+    sample_records = list(records_to_load.values())[:sample_size]
+    sample_size_bytes = calculate_total_size(dict(zip(range(sample_size), sample_records)), db_sync)
+    
+    # Estimate total size based on sample
+    estimated_size = (sample_size_bytes / sample_size) * total_records
+    return int(estimated_size)
+
+
+def bytes_to_mb(bytes):
+    return bytes / (1024 * 1024)
+
+
+def calculate_slices(records_to_load, db_sync, slices=1, chunk_threshold_size=10):
+    """Calculate the number of slices needed to flush the records to S3"""
+    total_size = bytes_to_mb(estimate_total_size(records_to_load, db_sync))
+    chunk_max_size = 256
+    if slices ==  1 or total_size <= chunk_threshold_size:
+        return total_size, 1
+    # divide into a multiple of slices, each slice should be < 1mb and < 256 mb
+    slice_multiplier = 1
+    while True:
+        size = ceiling_division(total_size, slices * slice_multiplier)
+        if size > chunk_max_size:
+            slice_multiplier += 1
+        else:
+            return total_size, slices * slice_multiplier
+
+
+def flush_records(stream, records_to_load, row_count, db_sync, compression=None, slices=None, temp_dir=None, chunk_threshold_size=10):
     use_gzip = compression == "gzip"
     use_bzip2 = compression == "bzip2"
 
@@ -390,19 +435,19 @@ def flush_records(stream, records_to_load, row_count, db_sync, compression=None,
         open_method = bz2.open
         file_extension = file_extension + ".bz2"
 
-    if not isinstance(slices, int):
-        raise Exception("The provided configuration value 'slices' was not an integer")
-
     csv_files = []
     s3_keys = []
     size_bytes = 0
-
     date_suffix = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
 
+    slices = slices or 1 # ideally number of nodes in the cluster   
+    estimated_size, calculated_slices = calculate_slices(records_to_load, db_sync, slices, chunk_threshold_size) # multiple of slices where each slice is < 1mb and < 256 mb
+
+    LOGGER.info(f"Calculated slices: {calculated_slices} for stream: {stream} with {len(records_to_load)} records and estimated size: {estimated_size} MB")
     # chunk files by the 'slices' config parameter in order to optimise Redshift COPY loading
     # see https://docs.aws.amazon.com/redshift/latest/dg/c_best-practices-use-multiple-files.html
     chunks = chunk_iterable(
-        list(records_to_load.values()), ceiling_division(len(records_to_load), slices)
+        list(records_to_load.values()), ceiling_division(len(records_to_load), calculated_slices)
     )
     for chunk_number, chunk in enumerate(chunks, start=1):
         _, csv_file = mkstemp(suffix=file_extension + "." + str(chunk_number), prefix=f'{stream}_', dir=temp_dir)
