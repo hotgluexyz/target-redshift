@@ -407,7 +407,7 @@ def calculate_slices(records_to_load, db_sync, slices=1, chunk_threshold_size=10
     total_size = bytes_to_mb(estimate_total_size(records_to_load, db_sync))
     chunk_max_size = 256
     if slices ==  1 or total_size <= chunk_threshold_size:
-        return 1
+        return total_size, 1
     # divide into a multiple of slices, each slice should be < 1mb and < 256 mb
     slice_multiplier = 1
     while True:
@@ -415,7 +415,7 @@ def calculate_slices(records_to_load, db_sync, slices=1, chunk_threshold_size=10
         if size > chunk_max_size:
             slice_multiplier += 1
         else:
-            return slices * slice_multiplier
+            return total_size, slices * slice_multiplier
 
 
 def flush_records(stream, records_to_load, row_count, db_sync, compression=None, slices=None, temp_dir=None, chunk_threshold_size=10):
@@ -441,9 +441,10 @@ def flush_records(stream, records_to_load, row_count, db_sync, compression=None,
     date_suffix = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
 
     slices = slices or 1 # ideally number of nodes in the cluster   
-    calculated_slices = calculate_slices(records_to_load, db_sync, slices, chunk_threshold_size) # multiple of slices where each slice is < 1mb and < 256 mb
+    estimated_size, calculated_slices = calculate_slices(records_to_load, db_sync, slices, chunk_threshold_size) # multiple of slices where each slice is < 1mb and < 256 mb
 
-        # chunk files by the 'slices' config parameter in order to optimise Redshift COPY loading
+    LOGGER.info(f"Calculated slices: {calculated_slices} for stream: {stream} with {len(records_to_load)} records and estimated size: {estimated_size} MB")
+    # chunk files by the 'slices' config parameter in order to optimise Redshift COPY loading
     # see https://docs.aws.amazon.com/redshift/latest/dg/c_best-practices-use-multiple-files.html
     chunks = chunk_iterable(
         list(records_to_load.values()), ceiling_division(len(records_to_load), calculated_slices)
