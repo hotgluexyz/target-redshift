@@ -5,10 +5,11 @@ import mock
 import datetime
 
 import target_redshift
-from target_redshift import RecordValidationException
+from target_redshift import RecordValidationException, load_table_cache
 from target_redshift.db_sync import DbSync
 
 from psycopg2 import InternalError
+from psycopg2.errors import DuplicateColumn
 
 try:
     import tests.utils as test_utils
@@ -1075,3 +1076,56 @@ class TestTargetRedshift(object):
         target_redshift.persist_lines(self.config, tap_lines)
 
         self.assert_three_streams_are_loaded_in_redshift()
+
+    def test_create_table_updates_table_cache(self):
+        """When creating a table we should update the cache if there is any cache"""
+        tap_lines_before_adding_column = test_utils.get_test_tap_lines(
+            "messages-simple-schema.json"
+        )
+        schema_before = json.loads(tap_lines_before_adding_column[1])
+
+        redshift = DbSync(self.config, schema_before)
+        redshift.create_schema_if_not_exists()
+        redshift.table_cache = [{"table_schema": "some_schema", "table_name": "some_table", "column_name": "some_col"}]
+        redshift.create_table()      
+
+        expected_table_cache = [['public', 'test_table_one', 'c_varchar', 'character varying'], ['public', 'test_table_one', 'c_pk', 'numeric']]
+        assert expected_table_cache == redshift.table_cache
+
+    def test_add_new_column_doesnt_raise_DuplicateColumn_expcetion(self):
+        """Tests that adding a new column doesn't raise psycopg2.errors.DuplicateColumn"""
+        tap_lines_before_adding_column = test_utils.get_test_tap_lines(
+            "messages-simple-schema.json"
+        )
+        tap_lines_after_adding_column = test_utils.get_test_tap_lines(
+            "messages-simple-schema-add-column.json"
+        )
+        
+        try:
+            table_cache = load_table_cache(self.config)
+            target_redshift.persist_lines(self.config, tap_lines_before_adding_column, table_cache)
+
+            table_cache = load_table_cache(self.config)
+            target_redshift.persist_lines(self.config, tap_lines_after_adding_column, table_cache)
+        except DuplicateColumn as error:
+            raise AssertionError(f"Raised exception {error} when it should not!")
+        
+    
+    def test_add_new_column_doesnt_raise_DuplicateColumn_expcetion_with_overwrite_streams(self):
+        """Tests that adding a new column doesn't raise psycopg2.errors.DuplicateColumn"""
+        tap_lines_before_adding_column = test_utils.get_test_tap_lines(
+            "messages-simple-schema.json"
+        )
+        tap_lines_after_adding_column = test_utils.get_test_tap_lines(
+            "messages-simple-schema-add-column.json"
+        )
+        self.config["overwrite_streams"] = ["tap_mysql_test-test_table_one"]
+        
+        try:
+            table_cache = load_table_cache(self.config)
+            target_redshift.persist_lines(self.config, tap_lines_before_adding_column, table_cache)
+
+            table_cache = load_table_cache(self.config)
+            target_redshift.persist_lines(self.config, tap_lines_after_adding_column, table_cache)
+        except DuplicateColumn as error:
+            raise AssertionError(f"Raised exception {error} when it should not!")

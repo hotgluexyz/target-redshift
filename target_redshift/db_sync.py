@@ -743,10 +743,8 @@ class DbSync:
     def add_column(self, column, stream):
         add_column = "ALTER TABLE {} ADD COLUMN {}".format(self.table_name(stream, is_stage=False), column)
         self.logger.info('Adding column: {}'.format(add_column))
-        try:
-            self.query(add_column)
-        except psycopg2.errors.DuplicateColumn as e:
-            self.logger.warning(f"Failed to add, column '{column}' already exists: {e}")
+        
+        self.query(add_column)
 
     def create_table(self, is_stage=False):
         stream_schema_message = self.stream_schema_message
@@ -755,6 +753,9 @@ class DbSync:
 
         self.query(self.drop_table_query(is_stage=is_stage))
         self.query(self.create_table_query(is_stage=is_stage))
+
+        if self.table_cache:
+            self.table_cache = self.get_table_columns(filter_schemas=[self.schema_name])
 
     def create_table_and_grant_privilege(self, is_stage=False):
         self.create_table(is_stage=is_stage)
