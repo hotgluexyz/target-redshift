@@ -101,8 +101,8 @@ Full list of options in `config.json`:
 | skip_updates                        | Boolean |    No      | (Default: False) Do not update existing records when Primary Key is defined. Useful to improve performance when records are immutable, e.g. events
 | compression                         | String  |    No        | The compression method to use when writing files to S3 and running Redshift `COPY`. The currently supported methods are `gzip` or `bzip2`. Defaults to none (`""`). |
 | slices                              | Integer |    No      | The number of slices to split files into prior to running COPY on Redshift. This should be set to the number of Redshift slices. The number of slices per node depends on the node size of the cluster - run `SELECT COUNT(DISTINCT slice) slices FROM stv_slices` to calculate this. Defaults to `1`. |
+| chunk_threshold_size                | Integer |    No      | (Default: 10) Specifies the minimum estimated file size (in MB) required to enable chunking. |
 | temp_dir                            | String  |            | (Default: platform-dependent) Directory of temporary CSV files with RECORD messages. |
-| chunk_threshold_size                | Integer |    MB      | Specifies the maximum size of file (mb) to before chunking. |
 
 ### To run tests:
 
