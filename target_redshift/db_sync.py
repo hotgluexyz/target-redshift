@@ -359,7 +359,7 @@ class DbSync:
             return self.open_connection(should_create_table=False)
 
 
-    def query(self, query, params=None, timeout_ms=300_000):  # default timeout 30s
+    def query(self, query, params=None, timeout_ms=300_000):  # default timeout 5m
         self.logger.debug(f"Running query: {query}")
         with self.open_connection() as connection:
             with connection.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -575,7 +575,7 @@ class DbSync:
             self.logger.info(f"Error executing query: {str(e)}")
             raise
     
-    
+
     def primary_key_merge_condition(self):
         stream_schema_message = self.stream_schema_message
         names = primary_column_names(stream_schema_message)
