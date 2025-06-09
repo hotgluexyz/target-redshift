@@ -359,19 +359,24 @@ class DbSync:
             return self.open_connection(should_create_table=False)
 
 
-    def query(self, query, params=None):
-        self.logger.debug("Running query: {}".format(query))
+    def query(self, query, params=None, timeout_ms=300_000):  # default timeout 30s
+        self.logger.debug(f"Running query: {query}")
         with self.open_connection() as connection:
             with connection.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                cur.execute(
-                    query,
-                    params
-                )
+                try:
+                    # Set a statement timeout for this session
+                    cur.execute(f"SET statement_timeout = {timeout_ms};")
+                    cur.execute(query, params)
 
-                if cur.rowcount > 0 and cur.description:
-                    return cur.fetchall()
+                    if cur.rowcount > 0 and cur.description:
+                        return cur.fetchall()
 
-                return []
+                    return []
+                except psycopg2.extensions.QueryCanceledError as e:
+                    raise Exception(f"Query {query} timed out after {timeout_ms} ms: {str(e)}")
+                except Exception as e:
+                    self.logger.info(f"Error executing query: {str(e)}")
+                    raise
 
     def table_name(self, stream_name, is_stage=False, without_schema=False):
         stream_dict = stream_name_to_dict(stream_name)
@@ -434,6 +439,8 @@ class DbSync:
         stage_table = self.table_name(stream, is_stage=True)
         target_table = self.table_name(stream, is_stage=False)
 
+        timeout_ms = 900_000 # 15 minutes
+
         self.logger.info("Loading {} rows into '{}'".format(count, self.table_name(stream, is_stage=True)))
 
         # Get list if columns with types
@@ -445,120 +452,130 @@ class DbSync:
             for (name, schema) in self.flatten_schema.items()
         ]
 
-        with self.open_connection() as connection:
-            with connection.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                inserts = 0
-                updates = 0
+        try:
+            with self.open_connection() as connection:
+                with connection.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                    inserts = 0
+                    updates = 0
 
-                # Step 1: Create stage table if not exists
-                cur.execute(self.drop_table_query(is_stage=True))
-                cur.execute(self.create_table_query(is_stage=True))
+                    # add timeout per query
+                    cur.execute("SET statement_timeout = %s;", (timeout_ms,))
+                    # Step 1: Create stage table if not exists
+                    cur.execute(self.drop_table_query(is_stage=True))
+                    cur.execute(self.create_table_query(is_stage=True))
 
-                # Step 2: Generate copy credentials - prefer role if provided, otherwise use access and secret keys
-                copy_credentials = """
-                    iam_role '{aws_role_arn}'
-                """.format(aws_role_arn=self.connection_config['aws_redshift_copy_role_arn']) if self.connection_config.get("aws_redshift_copy_role_arn") else """
-                    ACCESS_KEY_ID '{aws_access_key_id}'
-                    SECRET_ACCESS_KEY '{aws_secret_access_key}'
-                    {aws_session_token}
-                """.format(
-                    aws_access_key_id=self.connection_config['aws_access_key_id'],
-                    aws_secret_access_key=self.connection_config['aws_secret_access_key'],
-                    aws_session_token="SESSION_TOKEN '{}'".format(self.connection_config['aws_session_token']) if self.connection_config.get('aws_session_token') else '',
-                )
+                    # Step 2: Generate copy credentials - prefer role if provided, otherwise use access and secret keys
+                    copy_credentials = """
+                        iam_role '{aws_role_arn}'
+                    """.format(aws_role_arn=self.connection_config['aws_redshift_copy_role_arn']) if self.connection_config.get("aws_redshift_copy_role_arn") else """
+                        ACCESS_KEY_ID '{aws_access_key_id}'
+                        SECRET_ACCESS_KEY '{aws_secret_access_key}'
+                        {aws_session_token}
+                    """.format(
+                        aws_access_key_id=self.connection_config['aws_access_key_id'],
+                        aws_secret_access_key=self.connection_config['aws_secret_access_key'],
+                        aws_session_token="SESSION_TOKEN '{}'".format(self.connection_config['aws_session_token']) if self.connection_config.get('aws_session_token') else '',
+                    )
 
-                # Step 3: Generate copy options - Override defaults from config.json if defined
-                copy_options = self.connection_config.get('copy_options',"""
-                    EMPTYASNULL BLANKSASNULL TRIMBLANKS TRUNCATECOLUMNS
-                    TIMEFORMAT 'auto'
-                    COMPUPDATE OFF STATUPDATE OFF
-                """)
+                    # Step 3: Generate copy options - Override defaults from config.json if defined
+                    copy_options = self.connection_config.get('copy_options',"""
+                        EMPTYASNULL BLANKSASNULL TRIMBLANKS TRUNCATECOLUMNS
+                        TIMEFORMAT 'auto'
+                        COMPUPDATE OFF STATUPDATE OFF
+                    """)
 
-                if compression == "gzip":
-                    compression_option = " GZIP"
-                elif compression == "bzip2":
-                    compression_option = " BZIP2"
-                else:
-                    compression_option = ""
+                    if compression == "gzip":
+                        compression_option = " GZIP"
+                    elif compression == "bzip2":
+                        compression_option = " BZIP2"
+                    else:
+                        compression_option = ""
 
-                # Step 4: Load into the stage table
-                copy_sql = """COPY {table} ({columns}) FROM 's3://{s3_bucket}/{s3_key}'
-                    {copy_credentials}
-                    {copy_options}
-                    DELIMITER ',' REMOVEQUOTES ESCAPE{compression_option}
-                """.format(
-                    table=stage_table,
-                    columns=', '.join([c['name'] for c in columns_with_trans]),
-                    s3_bucket=self.connection_config['s3_bucket'],
-                    s3_key=s3_key,
-                    copy_credentials=copy_credentials,
-                    copy_options=copy_options,
-                    compression_option=compression_option
-                )
-                self.logger.debug("Running query: {}".format(copy_sql))
-                cur.execute(copy_sql)
+                    # Step 4: Load into the stage table
+                    copy_sql = """COPY {table} ({columns}) FROM 's3://{s3_bucket}/{s3_key}'
+                        {copy_credentials}
+                        {copy_options}
+                        DELIMITER ',' REMOVEQUOTES ESCAPE{compression_option}
+                    """.format(
+                        table=stage_table,
+                        columns=', '.join([c['name'] for c in columns_with_trans]),
+                        s3_bucket=self.connection_config['s3_bucket'],
+                        s3_key=s3_key,
+                        copy_credentials=copy_credentials,
+                        copy_options=copy_options,
+                        compression_option=compression_option
+                    )
+                    self.logger.debug("Running query: {}".format(copy_sql))
+                    cur.execute(copy_sql)
 
-                # Step 5/a: Insert or Update if primary key defined
-                #           Do UPDATE first and second INSERT to calculate
-                #           the number of affected rows correctly
-                if len(stream_schema_message['key_properties']) > 0:
-                    # Step 5/a/1: Update existing records
-                    if not self.skip_updates:
-                        update_sql = """UPDATE {}
-                            SET {}
-                            FROM {} s
+                    # Step 5/a: Insert or Update if primary key defined
+                    #           Do UPDATE first and second INSERT to calculate
+                    #           the number of affected rows correctly
+                    if len(stream_schema_message['key_properties']) > 0:
+                        # Step 5/a/1: Update existing records
+                        if not self.skip_updates:
+                            update_sql = """UPDATE {}
+                                SET {}
+                                FROM {} s
+                                WHERE {}
+                            """.format(
+                                target_table,
+                                ', '.join(['{} = s.{}'.format(c['name'], c['name']) for c in columns_with_trans]),
+                                stage_table,
+                                self.primary_key_merge_condition()
+                            )
+                            self.logger.debug("Running query: {}".format(update_sql))
+                            cur.execute(update_sql)
+                            updates = cur.rowcount
+
+                        # Step 5/a/2: Insert new records
+                        insert_sql = """INSERT INTO {} ({})
+                            SELECT {}
+                            FROM {} s LEFT JOIN {}
+                            ON {}
                             WHERE {}
                         """.format(
                             target_table,
-                            ', '.join(['{} = s.{}'.format(c['name'], c['name']) for c in columns_with_trans]),
+                            ', '.join([c['name'] for c in columns_with_trans]),
+                            ', '.join(['s.{}'.format(c['name']) for c in columns_with_trans]),
                             stage_table,
-                            self.primary_key_merge_condition()
+                            target_table,
+                            self.primary_key_merge_condition(),
+                            ' AND '.join(['{}.{} IS NULL'.format(target_table, c) for c in primary_column_names(stream_schema_message)])
                         )
-                        self.logger.debug("Running query: {}".format(update_sql))
-                        cur.execute(update_sql)
-                        updates = cur.rowcount
+                        self.logger.debug("Running query: {}".format(insert_sql))
+                        cur.execute(insert_sql)
+                        inserts = cur.rowcount
 
-                    # Step 5/a/2: Insert new records
-                    insert_sql = """INSERT INTO {} ({})
-                        SELECT {}
-                        FROM {} s LEFT JOIN {}
-                        ON {}
-                        WHERE {}
-                    """.format(
-                        target_table,
-                        ', '.join([c['name'] for c in columns_with_trans]),
-                        ', '.join(['s.{}'.format(c['name']) for c in columns_with_trans]),
-                        stage_table,
-                        target_table,
-                        self.primary_key_merge_condition(),
-                        ' AND '.join(['{}.{} IS NULL'.format(target_table, c) for c in primary_column_names(stream_schema_message)])
-                    )
-                    self.logger.debug("Running query: {}".format(insert_sql))
-                    cur.execute(insert_sql)
-                    inserts = cur.rowcount
+                    # Step 5/b: Insert only if no primary key
+                    else:
+                        insert_sql = """INSERT INTO {} ({})
+                            SELECT {}
+                            FROM {} s
+                        """.format(
+                            target_table,
+                            ', '.join([c['name'] for c in columns_with_trans]),
+                            ', '.join(['s.{}'.format(c['name']) for c in columns_with_trans]),
+                            stage_table
+                        )
+                        self.logger.debug("Running query: {}".format(insert_sql))
+                        cur.execute(insert_sql)
+                        inserts = cur.rowcount
 
-                # Step 5/b: Insert only if no primary key
-                else:
-                    insert_sql = """INSERT INTO {} ({})
-                        SELECT {}
-                        FROM {} s
-                    """.format(
-                        target_table,
-                        ', '.join([c['name'] for c in columns_with_trans]),
-                        ', '.join(['s.{}'.format(c['name']) for c in columns_with_trans]),
-                        stage_table
-                    )
-                    self.logger.debug("Running query: {}".format(insert_sql))
-                    cur.execute(insert_sql)
-                    inserts = cur.rowcount
+                    # Step 6: Drop stage table
+                    cur.execute(self.drop_table_query(is_stage=True))
 
-                # Step 6: Drop stage table
-                cur.execute(self.drop_table_query(is_stage=True))
+                    self.logger.info('Loading into {}: {}'.format(
+                        self.table_name(stream, False),
+                        json.dumps({'inserts': inserts, 'updates': updates, 'size_bytes': size_bytes})))
 
-                self.logger.info('Loading into {}: {}'.format(
-                    self.table_name(stream, False),
-                    json.dumps({'inserts': inserts, 'updates': updates, 'size_bytes': size_bytes})))
-
+        except psycopg2.extensions.QueryCanceledError as e:
+            raise Exception(f"Query timed out after {timeout_ms} ms: {str(e)}")
+        except Exception as e:
+            self.logger.info(f"Error executing query: {str(e)}")
+            raise
+    
+    
     def primary_key_merge_condition(self):
         stream_schema_message = self.stream_schema_message
         names = primary_column_names(stream_schema_message)
