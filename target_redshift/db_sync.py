@@ -30,7 +30,6 @@ def is_transient_error(e):
     transient_indicators = [
         "connection has been closed",
         "could not connect to server",
-        "connection refused",
         "connection timed out",
         "server closed the connection unexpectedly",
         "terminating connection due to administrator command",
