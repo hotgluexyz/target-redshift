@@ -27,11 +27,23 @@ BACKOFF_JITTER = None
 def is_transient_error(e):
     """Check if error is a transient SSL error that can be retried quickly"""
     error_message = str(e)
-    return isinstance(e, psycopg2.OperationalError) and (
-        "SSL connection has been closed unexpectedly" in error_message or
-        "SSL SYSCALL error: EOF detected" in error_message
-    )
-
+    transient_indicators = [
+        "connection has been closed",
+        "could not connect to server",
+        "connection refused",
+        "connection timed out",
+        "server closed the connection unexpectedly",
+        "terminating connection due to administrator command",
+        "ssl syscall error",
+        "eof detected",
+        "broken pipe",
+        "connection reset by peer",
+        "the database system is starting up",
+        "the database system is shutting down",
+        "could not send data to server",
+        "could not receive data from server",
+    ]
+    return any(msg in error_message.lower() for msg in transient_indicators)
 
 def is_maintenance_error(e):
     """Check if error indicates Redshift is in maintenance or restarting"""
