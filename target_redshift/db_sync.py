@@ -10,6 +10,7 @@ import boto3
 import psycopg2
 import psycopg2.extras
 import psycopg2.sql
+import backoff
 
 import inflection
 from singer import get_logger
@@ -18,6 +19,48 @@ from singer import get_logger
 DEFAULT_VARCHAR_LENGTH = 10000
 SHORT_VARCHAR_LENGTH = 256
 LONG_VARCHAR_LENGTH = 65535
+BACKOFF_FACTOR = 4
+BACKOFF_MAX_TRIES = 5
+BACKOFF_JITTER = None
+
+# Define predicates for different error types
+def is_transient_error(e):
+    """Check if error is a transient SSL error that can be retried quickly"""
+    error_message = str(e)
+    transient_indicators = [
+        "connection has been closed",
+        "could not connect to server",
+        "connection timed out",
+        "server closed the connection unexpectedly",
+        "terminating connection due to administrator command",
+        "ssl syscall error",
+        "eof detected",
+        "broken pipe",
+        "connection reset by peer",
+        "the database system is starting up",
+        "the database system is shutting down",
+        "could not send data to server",
+        "could not receive data from server",
+    ]
+    return any(msg in error_message.lower() for msg in transient_indicators)
+
+def is_maintenance_error(e):
+    """Check if error indicates Redshift is in maintenance or restarting"""
+    error_message = str(e)
+    return isinstance(e, psycopg2.OperationalError) and (
+        "restarting" in error_message or
+        "maintenance mode" in error_message
+    )
+
+
+def on_backoff(details):
+    """Log backoff attempts"""
+    logger = get_logger('target_redshift')
+    exception = sys.exc_info()[1]
+    logger.warning(
+        f"Connection error, backing off {details['wait']:.1f}s after {details['tries']} tries. "
+        f"Error: {str(exception)}"
+    )
 
 
 def validate_config(config):
@@ -318,6 +361,17 @@ class DbSync:
             self.data_flattening_max_level = self.connection_config.get('data_flattening_max_level', 0)
             self.flatten_schema = flatten_schema(stream_schema_message['schema'], max_level=self.data_flattening_max_level)
 
+    # Apply backoff for connection issues based on error type
+    @backoff.on_exception(
+        backoff.expo,
+        psycopg2.OperationalError,
+        max_tries=BACKOFF_MAX_TRIES,
+        factor=BACKOFF_FACTOR,
+        jitter=BACKOFF_JITTER,
+        # Continue retrying only if error is a known transient or maintenance issue.
+        giveup=lambda e: not (is_transient_error(e) or is_maintenance_error(e)),
+        on_backoff=on_backoff
+    )
     def open_connection(self, should_create_table=True):
         build_conn_string = lambda dbname: "host='{}' dbname='{}' user='{}' password='{}' port='{}'".format(
                 self.connection_config['host'],
