@@ -26,23 +26,42 @@ BACKOFF_JITTER = None
 # Define predicates for different error types
 def is_transient_error(e):
     """Check if error is a transient SSL error that can be retried quickly"""
-    error_message = str(e)
-    transient_indicators = [
-        "connection has been closed",
-        "could not connect to server",
-        "connection timed out",
-        "server closed the connection unexpectedly",
-        "terminating connection due to administrator command",
-        "ssl syscall error",
-        "eof detected",
-        "broken pipe",
-        "connection reset by peer",
-        "the database system is starting up",
-        "the database system is shutting down",
-        "could not send data to server",
-        "could not receive data from server",
-    ]
-    return any(msg in error_message.lower() for msg in transient_indicators)
+    # InterfaceError is always transient (connection management issues)
+    if isinstance(e, psycopg2.InterfaceError):
+        return True
+    
+    # For OperationalError, check the error message
+    if isinstance(e, psycopg2.OperationalError):
+        error_message = str(e)
+        transient_indicators = [
+            "connection has been closed",
+            "connection already closed",
+            "could not connect to server",
+            "connection timed out",
+            "connection lost",
+            "server closed the connection unexpectedly",
+            "terminating connection due to administrator command",
+            "ssl syscall error",
+            "ssl error",
+            "eof detected",
+            "broken pipe",
+            "connection reset by peer",
+            "could not send data to server",
+            "could not receive data from server",
+            "the database system is starting up",
+            "the database system is shutting down",
+            "could not send data to server",
+            "could not receive data from server",
+            "ssl connection has been closed unexpectedly",
+            "too many connections",
+            "out of memory",
+            "lock timeout",
+            "canceling statement due to conflict with recovery",
+            "cluster is paused",
+            "cluster is being resized",
+            "cluster is busy",
+        ]
+        return any(msg in error_message.lower() for msg in transient_indicators)
 
 def is_maintenance_error(e):
     """Check if error indicates Redshift is in maintenance or restarting"""
@@ -364,7 +383,7 @@ class DbSync:
     # Apply backoff for connection issues based on error type
     @backoff.on_exception(
         backoff.expo,
-        psycopg2.OperationalError,
+        (psycopg2.OperationalError, psycopg2.InterfaceError),
         max_tries=BACKOFF_MAX_TRIES,
         factor=BACKOFF_FACTOR,
         jitter=BACKOFF_JITTER,
@@ -412,7 +431,15 @@ class DbSync:
 
             return self.open_connection(should_create_table=False)
 
-
+    @backoff.on_exception(
+        backoff.expo,
+        (psycopg2.OperationalError, psycopg2.InterfaceError),
+        max_tries=BACKOFF_MAX_TRIES,
+        factor=BACKOFF_FACTOR,
+        jitter=BACKOFF_JITTER,
+        giveup=lambda e: not is_transient_error(e),
+        on_backoff=on_backoff
+    )
     def query(self, query, params=None, timeout_ms=300_000):  # default timeout 5m
         self.logger.debug(f"Running query: {query}")
         with self.open_connection() as connection:
@@ -487,6 +514,15 @@ class DbSync:
         self.s3.delete_object(Bucket=bucket, Key=s3_key)
 
     # pylint: disable=too-many-locals
+    @backoff.on_exception(
+        backoff.expo,
+        (psycopg2.OperationalError, psycopg2.InterfaceError),
+        max_tries=BACKOFF_MAX_TRIES,
+        factor=BACKOFF_FACTOR,
+        jitter=BACKOFF_JITTER,
+        giveup=lambda e: not is_transient_error(e),
+        on_backoff=on_backoff
+    )
     def load_csv(self, s3_key, count, size_bytes, compression=False):
         stream_schema_message = self.stream_schema_message
         stream = stream_schema_message['stream']
