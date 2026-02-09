@@ -1,5 +1,7 @@
 import pytest
+from unittest.mock import patch, MagicMock, call
 import target_redshift
+from target_redshift.db_sync import DbSync
 
 
 class TestTargetRedshift(object):
@@ -322,3 +324,119 @@ class TestTargetRedshift(object):
         for idx, (should_use_flatten_schema, record, expected_output) in enumerate(test_cases):
             output = flatten_record(record, flatten_schema if should_use_flatten_schema else None)
             assert output == expected_output
+
+
+class TestSyncTableOverwrite(object):
+    """Tests for overwrite_streams with drop and truncate methods in sync_table()"""
+
+    STREAM_NAME = "my_schema-my_table"
+    SCHEMA_NAME = "test_schema"
+
+    def _make_db_sync(self, connection_config, table_exists=True):
+        """Create a DbSync instance with __init__ mocked out."""
+        with patch.object(DbSync, '__init__', lambda self, *a, **kw: None):
+            db_sync = DbSync.__new__(DbSync)
+
+        db_sync.connection_config = connection_config
+        db_sync.stream_schema_message = {'stream': self.STREAM_NAME}
+        db_sync.schema_name = self.SCHEMA_NAME
+        db_sync.logger = MagicMock()
+
+        # Mock table_name to return predictable values
+        def fake_table_name(stream_name, is_stage=False, without_schema=False):
+            if without_schema:
+                return '"MY_TABLE"'
+            return f'{self.SCHEMA_NAME}."MY_TABLE"'
+        db_sync.table_name = MagicMock(side_effect=fake_table_name)
+
+        # Set up table_cache to simulate table existing or not
+        if table_exists:
+            db_sync.table_cache = [
+                {'table_schema': self.SCHEMA_NAME.lower(), 'table_name': 'MY_TABLE'}
+            ]
+        else:
+            db_sync.table_cache = None
+            db_sync.get_tables = MagicMock(return_value=[])
+
+        # Mock methods called by sync_table
+        db_sync.create_table_and_grant_privilege = MagicMock()
+        db_sync.truncate_table = MagicMock()
+        db_sync.update_columns = MagicMock()
+
+        return db_sync
+
+    def test_overwrite_drop_default_when_table_exists(self):
+        """overwrite_streams with no overwrite_method should drop+recreate (default)"""
+        config = {'overwrite_streams': [self.STREAM_NAME]}
+        db_sync = self._make_db_sync(config, table_exists=True)
+
+        db_sync.sync_table()
+
+        db_sync.create_table_and_grant_privilege.assert_called_once()
+        db_sync.truncate_table.assert_not_called()
+        db_sync.update_columns.assert_not_called()
+
+    def test_overwrite_drop_explicit_when_table_exists(self):
+        """overwrite_streams with overwrite_method='drop' should drop+recreate"""
+        config = {'overwrite_streams': [self.STREAM_NAME], 'overwrite_method': 'drop'}
+        db_sync = self._make_db_sync(config, table_exists=True)
+
+        db_sync.sync_table()
+
+        db_sync.create_table_and_grant_privilege.assert_called_once()
+        db_sync.truncate_table.assert_not_called()
+        db_sync.update_columns.assert_not_called()
+
+    def test_overwrite_truncate_when_table_exists(self):
+        """overwrite_streams with overwrite_method='truncate' should truncate + update_columns"""
+        config = {'overwrite_streams': [self.STREAM_NAME], 'overwrite_method': 'truncate'}
+        db_sync = self._make_db_sync(config, table_exists=True)
+
+        db_sync.sync_table()
+
+        db_sync.truncate_table.assert_called_once()
+        db_sync.update_columns.assert_called_once()
+        db_sync.create_table_and_grant_privilege.assert_not_called()
+
+    def test_overwrite_truncate_when_table_does_not_exist(self):
+        """overwrite_streams with overwrite_method='truncate' should create table if it doesn't exist"""
+        config = {'overwrite_streams': [self.STREAM_NAME], 'overwrite_method': 'truncate'}
+        db_sync = self._make_db_sync(config, table_exists=False)
+
+        db_sync.sync_table()
+
+        db_sync.create_table_and_grant_privilege.assert_called_once()
+        db_sync.truncate_table.assert_not_called()
+        db_sync.update_columns.assert_not_called()
+
+    def test_overwrite_drop_when_table_does_not_exist(self):
+        """overwrite_streams with default drop should create table if it doesn't exist"""
+        config = {'overwrite_streams': [self.STREAM_NAME]}
+        db_sync = self._make_db_sync(config, table_exists=False)
+
+        db_sync.sync_table()
+
+        db_sync.create_table_and_grant_privilege.assert_called_once()
+        db_sync.truncate_table.assert_not_called()
+
+    def test_no_overwrite_table_exists(self):
+        """Stream NOT in overwrite_streams with existing table should just update_columns"""
+        config = {}
+        db_sync = self._make_db_sync(config, table_exists=True)
+
+        db_sync.sync_table()
+
+        db_sync.update_columns.assert_called_once()
+        db_sync.create_table_and_grant_privilege.assert_not_called()
+        db_sync.truncate_table.assert_not_called()
+
+    def test_no_overwrite_table_does_not_exist(self):
+        """Stream NOT in overwrite_streams with no table should create it"""
+        config = {}
+        db_sync = self._make_db_sync(config, table_exists=False)
+
+        db_sync.sync_table()
+
+        db_sync.create_table_and_grant_privilege.assert_called_once()
+        db_sync.truncate_table.assert_not_called()
+        db_sync.update_columns.assert_not_called()

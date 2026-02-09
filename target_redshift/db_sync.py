@@ -853,6 +853,12 @@ class DbSync:
         
         self.query(add_column)
 
+    def truncate_table(self):
+        stream = self.stream_schema_message['stream']
+        table = self.table_name(stream, is_stage=False)
+        self.logger.info("Truncating table {}...".format(table))
+        self.query('TRUNCATE TABLE {}'.format(table))
+
     def create_table(self, is_stage=False):
         stream_schema_message = self.stream_schema_message
         stream = stream_schema_message['stream']
@@ -872,9 +878,6 @@ class DbSync:
         stream_schema_message = self.stream_schema_message
         stream = stream_schema_message['stream']
 
-        if stream in self.connection_config.get('overwrite_streams', []):
-            self.create_table_and_grant_privilege()
-
         table_name = self.table_name(stream, is_stage=False, without_schema=True)
         table_name_with_schema = self.table_name(stream, is_stage=False, without_schema=False)
 
@@ -886,8 +889,14 @@ class DbSync:
             found_tables = [table for table in (self.get_tables(self.schema_name.lower()))
                             if f'"{table["table_name"].upper()}"' == table_name]
 
-        # Create target table if not exists
-        if len(found_tables) == 0:
+        if stream in self.connection_config.get('overwrite_streams', []):
+            overwrite_method = self.connection_config.get('overwrite_method', 'drop')
+            if len(found_tables) > 0 and overwrite_method == 'truncate':
+                self.truncate_table()
+                self.update_columns()
+            else:
+                self.create_table_and_grant_privilege()
+        elif len(found_tables) == 0:
             self.logger.info("Table '{}' does not exist. Creating...".format(table_name_with_schema))
             self.create_table_and_grant_privilege()
         else:
