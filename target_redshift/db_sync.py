@@ -881,6 +881,11 @@ class DbSync:
         table_name = self.table_name(stream, is_stage=False, without_schema=True)
         table_name_with_schema = self.table_name(stream, is_stage=False, without_schema=False)
 
+        if stream in self.connection_config.get('overwrite_streams', []):
+            self.logger.info(f"Droping and recreating... {table_name}")
+            self.create_table_and_grant_privilege()
+            return
+
         if self.table_cache:
             found_tables = list(filter(lambda x: x['table_schema'] == self.schema_name.lower() and
                                                  f'"{x["table_name"].upper()}"' == table_name,
